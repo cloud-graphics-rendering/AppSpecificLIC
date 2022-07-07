@@ -61,27 +61,20 @@ $ python
 ### Encoder & Decoder (GPU Mode)
 (1) Test single image with single model:
 
-Test 105.png with large model:
+Test 105.png with a specified model under small-pruning framework:
 
-```./evaluate.sh -m "./models/large/supertuxkart_lambda0.16_bpp1.52_mse14.6_1600.ckpt" -t "../datasets/GameImage_dataset/test/supertuxkart-720p/105.png" -s 3```
+```./evaluate.sh -m "./models/small-spruning/supertuxkart_spruning_lambda0.01.ckpt" -t "../datasets/GameImage_dataset/test/supertuxkart-720p/105.png" -s 1```
 
 Then, you will find a newly generated ".csv" file in current directory, and it contains the metrics we care about.
 
-Similarly, you can try median model, small model, xsmall model with -s = 2, 1, 0
 
-```
-./evaluate.sh -m "./models/median/supertuxkart_lambda0.001.ckpt" -t "../datasets/GameImage_dataset/test/supertuxkart-720p/105.png" -s 2
-./evaluate.sh -m "./models/small/supertuxkart_lambda0.001.ckpt" -t "../datasets/GameImage_dataset/test/supertuxkart-720p/105.png" -s 1
-./evaluate.sh -m "./models/xsmall/supertuxkart_lambda0.001.ckpt" -t "../datasets/GameImage_dataset/test/supertuxkart-720p/105.png" -s 0
-```
-
-(2) Test all the images with all the models in the GamingImage datasets (for each command, it will take a very long time). For example:
+(2) Test all the images with all the models under small-pruning framework in the GamingImage datasets (for each command, it will take a very long time). For example:
 
 ```./evaluate.sh -n 0ad -s 1```
 
-You can have other combinations:
+You can also try other games:
 
-```./evaluate.sh -n supertuxkart/0ad/redeclipse/dota2/inmind/imhotep -s 3/2/1/0```
+```./evaluate.sh -n supertuxkart/0ad/redeclipse/dota2/inmind/imhotep -s 1```
 
 For each run, you will also get a newly generated ".csv" file.
 ## How to train your own models?

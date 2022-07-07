@@ -291,6 +291,7 @@ class SideInfoReconModel(nn.Module):
             nn.LeakyReLU(0.2)
         )
         self.layer_4 = nn.Sequential(
+            #nn.ZeroPad2d((1, 1, 0, 0)),
             nn.ZeroPad2d((1, 0, 1, 0)),
             nn.ConvTranspose2d(num_filters*2, num_filters //
                                3, 5, 2, 3, output_padding=1)
@@ -302,10 +303,11 @@ class SideInfoReconModel(nn.Module):
         self.layer_6 = nn.Conv2d(num_filters//12, 3, 1, 1, 0)
         self.d2s = Depth2Space(2)
 
-    def forward(self, pf, h2, h1):
-        h1prime = self.d2s(h1)
-        h = torch.cat([h2, h1prime], 1)
-        h = self.layer_1(h)
+    #def forward(self, pf, h2, h1):
+    def forward(self, pf, h2):
+        #h1prime = self.d2s(h1)
+        #h = torch.cat([h2, h1prime], 1)
+        h = self.layer_1(h2)
         h = self.layer_1a(h)
         h = self.layer_1b(h)
 
@@ -356,29 +358,19 @@ class NetLarge(nn.Module):
         self.s_model = synthesisTransformModel(
             384, [384, 384, 384, 3])
 
-        self.ha_model_1 = h_analysisTransformModel(
-            64*4, [64*4*2, 32*4*2, 32*4], [1, 1, 1])
-        self.hs_model_1 = h_synthesisTransformModel(
-            32*4, [64*4*2, 64*4*2, 64*4], [1, 1, 1])
-
         self.ha_model_2 = h_analysisTransformModel(
             384, [384*2, 192*4*2, 64*4], [1, 1, 1])
         self.hs_model_2 = h_synthesisTransformModel(
             64*4, [192*4*2, 192*4*2, 384], [1, 1, 1])
 
-        self.entropy_bottleneck_z1 = GaussianModel()
         self.entropy_bottleneck_z2 = GaussianModel()
         self.entropy_bottleneck_z3 = GaussianModel()
         b, h, w, c = train_size
         tb, th, tw, tc = test_size
 
-        self.h1_sigma = torch.nn.Parameter(torch.ones(
-            (1, 32*4, 1, 1), dtype=torch.float32, requires_grad=True))
-        self.register_parameter('get_h1_sigma', self.h1_sigma)
-
-        self.v_z2_sigma = torch.nn.Parameter(torch.ones(
+        self.h2_sigma = torch.nn.Parameter(torch.ones(
             (1, 64*4, 1, 1), dtype=torch.float32, requires_grad=True))
-        self.register_parameter('z2_sigma', self.v_z2_sigma)
+        self.register_parameter('get_h2_sigma', self.h2_sigma)
 
         self.prediction_model_2 = PredictionModel(
             in_dim=64*4, dim=64*4, outdim=64*4*2)
@@ -389,7 +381,7 @@ class NetLarge(nn.Module):
         self.sampler_2 = NeighborSample((b, 64*4, h//2//8, w//2//8))
         self.sampler_3 = NeighborSample((b, 384, h//8, w//8))
 
-        self.side_recon_model = SideInfoReconModel(384+64, num_filters=384)
+        self.side_recon_model = SideInfoReconModel(384, num_filters=384)
 
         self.proj_head_z3 = ProjHead(384, 384)
         self.proj_head_z2 = ProjHead(64*4, 64*4)
@@ -409,39 +401,10 @@ class NetLarge(nn.Module):
             params.append(v)
         for v in self.prediction_model_3.parameters():
             params.append(v)
-        params.append(self.z2_sigma)
+        params.append(self.get_h2_sigma)
 
         return params
     
-    def stage2_params(self):
-        params = []
-
-        for v in self.a_model.parameters():
-            params.append(v)
-        for v in self.s_model.parameters():
-            params.append(v)
-
-        for v in self.ha_model_2.parameters():
-            params.append(v)
-        for v in self.hs_model_2.parameters():
-            params.append(v)
-        for v in self.proj_head_z3.parameters():
-            params.append(v)
-        for v in self.prediction_model_3.parameters():
-            params.append(v)
-
-        for v in self.ha_model_1.parameters():
-            params.append(v)
-        for v in self.hs_model_1.parameters():
-            params.append(v)
-        for v in self.proj_head_z2.parameters():
-            params.append(v)
-        for v in self.prediction_model_2.parameters():
-            params.append(v)
-        params.append(self.get_h1_sigma)
-
-        return params
-
     # We adopt a multi-stage training procedure
     def forward(self, inputs, mode='train', stage=1):
         b, h, w, c = self.train_size
@@ -457,33 +420,13 @@ class NetLarge(nn.Module):
         z2_noisy = z2 + noise
         z2_rounded = bypass_round(z2)
 
-        if stage > 1: # h1 enabled after stage 2
-            z1 = self.ha_model_1(z2_rounded)
-            noise = torch.rand_like(z1) - 0.5
-            z1_noisy = z1 + noise
-            z1_rounded = bypass_round(z1)
-
-            z1_sigma = torch.abs(self.get_h1_sigma)
-            z1_mu = torch.zeros_like(z1_sigma)
-
-            h1 = self.hs_model_1(z1_rounded)
-            if stage < 4:
-                proj_z2 = self.proj_head_z2(h1)
-        
         h2 = self.hs_model_2(z2_rounded)
         if stage < 4: # helping loss enabled before stage 4
             proj_z3 = self.proj_head_z3(h2)
 
         if mode == 'train':
-            if stage > 1: # when h1 enabled after stage 2
-                z1_likelihoods = self.entropy_bottleneck_z1(
-                    z1_noisy, z1_sigma, z1_mu)
-
-                z2_mu, z2_sigma = self.prediction_model_2(
-                    (b, 64*4, h//2//16, w//2//16), h1, self.sampler_2)
-            else:
-                z2_sigma = torch.abs(self.z2_sigma)
-                z2_mu = torch.zeros_like(z2_sigma)
+            z2_sigma = torch.abs(self.get_h2_sigma)
+            z2_mu = torch.zeros_like(z2_sigma)
 
             z2_likelihoods = self.entropy_bottleneck_z2(
                 z2_noisy, z2_sigma, z2_mu)
@@ -494,15 +437,8 @@ class NetLarge(nn.Module):
             z3_likelihoods = self.entropy_bottleneck_z3(
                 z3_noisy, z3_sigma, z3_mu)
         else:
-            if stage > 1: # when h1 enabled after stage 2
-                z1_likelihoods = self.entropy_bottleneck_z1(
-                    z1_rounded, z1_sigma, z1_mu)
-
-                z2_mu, z2_sigma = self.prediction_model_2(
-                    (tb, 64*4, th//2//16, tw//2//16), h1, self.sampler_2)
-            else:
-                z2_sigma = torch.abs(self.z2_sigma)
-                z2_mu = torch.zeros_like(z2_sigma)
+            z2_sigma = torch.abs(self.get_h2_sigma)
+            z2_mu = torch.zeros_like(z2_sigma)
 
             z2_likelihoods = self.entropy_bottleneck_z2(
                 z2_rounded, z2_sigma, z2_mu)
@@ -518,7 +454,7 @@ class NetLarge(nn.Module):
             x_tilde = y
         elif stage >= 3: # side-info recon model on
             pf, y = self.s_model(z3_rounded)
-            x_tilde = self.side_recon_model(pf, h2, h1)
+            x_tilde = self.side_recon_model(pf, h2)
 
         num_pixels = inputs.size()[0] * h * w
 
@@ -527,31 +463,16 @@ class NetLarge(nn.Module):
             train_mse = torch.mean((inputs - x_tilde) ** 2, [0, 1, 2, 3])
             train_mse *= 255**2
 
-            if stage == 1: # RDO on h2 and h3
+            if stage == 1 or stage == 2 or stage == 3: # RDO on h2 and h3
                 bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
                         for l in [z2_likelihoods, z3_likelihoods]]
                 train_bpp = bpp_list[0] + bpp_list[1]
                 train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
                 train_loss = args.lmbda * train_mse + train_bpp + train_aux3
-
-            elif stage == 2: # Full RDO on h1, h2 and h3
-                bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                        for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
-                train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
-                train_aux2 = torch.nn.MSELoss(reduction='mean')(z2.detach(), proj_z2)
-                train_loss = args.lmbda * train_mse + train_bpp + train_aux2 + train_aux3
-            elif stage == 3: # with side recon model; full RDO
-                bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                            for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
-                train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
-                train_aux2 = torch.nn.MSELoss(reduction='mean')(z2.detach(), proj_z2)
-                train_loss = args.lmbda * train_mse + train_bpp + train_aux2 + train_aux3
             else: # no aux loss
                 bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                            for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
+                            for l in [z2_likelihoods, z3_likelihoods]]
+                train_bpp = bpp_list[0] + bpp_list[1]
                 train_loss = args.lmbda * train_mse + train_bpp
 
             return train_loss, train_bpp, train_mse
@@ -559,21 +480,13 @@ class NetLarge(nn.Module):
         elif mode == 'test':
             test_num_pixels = inputs.size()[0] * 256 ** 2
 
-            if stage == 1:
-                eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            #if stage == 1:
+            eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
                 
-                bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp1 = torch.zeros_like(bpp2)
+            bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            bpp1 = torch.zeros_like(bpp2)
                 
-            else:
-                eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [
-                    0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z1_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                
-                bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp1 = torch.sum(torch.log(z1_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-
             # Bring both images back to 0..255 range.
             gt = torch.round((inputs + 1) * 127.5)
             x_hat = torch.clamp((x_tilde + 1) * 127.5, 0, 255)
@@ -592,29 +505,19 @@ class NetMedian(nn.Module):
         self.s_model = synthesisTransformModel(
             192, [192, 192, 192, 3])
 
-        self.ha_model_1 = h_analysisTransformModel(
-            64*4, [64*4, 32*4, 32*4], [1, 1, 1])
-        self.hs_model_1 = h_synthesisTransformModel(
-            32*4, [32*4, 64*4, 64*4], [1, 1, 1])
-
         self.ha_model_2 = h_analysisTransformModel(
             192, [192*2, 192*4, 64*4], [1, 1, 1])
         self.hs_model_2 = h_synthesisTransformModel(
             64*4, [192*4, 192*2, 192], [1, 1, 1])
 
-        self.entropy_bottleneck_z1 = GaussianModel()
         self.entropy_bottleneck_z2 = GaussianModel()
         self.entropy_bottleneck_z3 = GaussianModel()
         b, h, w, c = train_size
         tb, th, tw, tc = test_size
 
-        self.h1_sigma = torch.nn.Parameter(torch.ones(
-            (1, 32*4, 1, 1), dtype=torch.float32, requires_grad=True))
-        self.register_parameter('get_h1_sigma', self.h1_sigma)
-
-        self.v_z2_sigma = torch.nn.Parameter(torch.ones(
+        self.h2_sigma = torch.nn.Parameter(torch.ones(
             (1, 64*4, 1, 1), dtype=torch.float32, requires_grad=True))
-        self.register_parameter('z2_sigma', self.v_z2_sigma)
+        self.register_parameter('get_h2_sigma', self.h2_sigma)
 
         self.prediction_model_2 = PredictionModel(
             in_dim=64*4, dim=64*4, outdim=64*4*2)
@@ -625,7 +528,7 @@ class NetMedian(nn.Module):
         self.sampler_2 = NeighborSample((b, 64*4, h//2//8, w//2//8))
         self.sampler_3 = NeighborSample((b, 192, h//8, w//8))
 
-        self.side_recon_model = SideInfoReconModel(192+64, num_filters=192)
+        self.side_recon_model = SideInfoReconModel(192, num_filters=192)
 
         self.proj_head_z3 = ProjHead(192, 192)
         self.proj_head_z2 = ProjHead(64*4, 64*4)
@@ -645,36 +548,7 @@ class NetMedian(nn.Module):
             params.append(v)
         for v in self.prediction_model_3.parameters():
             params.append(v)
-        params.append(self.z2_sigma)
-
-        return params
-    
-    def stage2_params(self):
-        params = []
-
-        for v in self.a_model.parameters():
-            params.append(v)
-        for v in self.s_model.parameters():
-            params.append(v)
-
-        for v in self.ha_model_2.parameters():
-            params.append(v)
-        for v in self.hs_model_2.parameters():
-            params.append(v)
-        for v in self.proj_head_z3.parameters():
-            params.append(v)
-        for v in self.prediction_model_3.parameters():
-            params.append(v)
-
-        for v in self.ha_model_1.parameters():
-            params.append(v)
-        for v in self.hs_model_1.parameters():
-            params.append(v)
-        for v in self.proj_head_z2.parameters():
-            params.append(v)
-        for v in self.prediction_model_2.parameters():
-            params.append(v)
-        params.append(self.get_h1_sigma)
+        params.append(self.get_h2_sigma)
 
         return params
 
@@ -693,33 +567,13 @@ class NetMedian(nn.Module):
         z2_noisy = z2 + noise
         z2_rounded = bypass_round(z2)
 
-        if stage > 1: # h1 enabled after stage 2
-            z1 = self.ha_model_1(z2_rounded)
-            noise = torch.rand_like(z1) - 0.5
-            z1_noisy = z1 + noise
-            z1_rounded = bypass_round(z1)
-
-            z1_sigma = torch.abs(self.get_h1_sigma)
-            z1_mu = torch.zeros_like(z1_sigma)
-
-            h1 = self.hs_model_1(z1_rounded)
-            if stage < 4:
-                proj_z2 = self.proj_head_z2(h1)
-        
         h2 = self.hs_model_2(z2_rounded)
         if stage < 4: # helping loss enabled before stage 4
             proj_z3 = self.proj_head_z3(h2)
 
         if mode == 'train':
-            if stage > 1: # when h1 enabled after stage 2
-                z1_likelihoods = self.entropy_bottleneck_z1(
-                    z1_noisy, z1_sigma, z1_mu)
-
-                z2_mu, z2_sigma = self.prediction_model_2(
-                    (b, 64*4, h//2//16, w//2//16), h1, self.sampler_2)
-            else:
-                z2_sigma = torch.abs(self.z2_sigma)
-                z2_mu = torch.zeros_like(z2_sigma)
+            z2_sigma = torch.abs(self.get_h2_sigma)
+            z2_mu = torch.zeros_like(z2_sigma)
 
             z2_likelihoods = self.entropy_bottleneck_z2(
                 z2_noisy, z2_sigma, z2_mu)
@@ -730,15 +584,8 @@ class NetMedian(nn.Module):
             z3_likelihoods = self.entropy_bottleneck_z3(
                 z3_noisy, z3_sigma, z3_mu)
         else:
-            if stage > 1: # when h1 enabled after stage 2
-                z1_likelihoods = self.entropy_bottleneck_z1(
-                    z1_rounded, z1_sigma, z1_mu)
-
-                z2_mu, z2_sigma = self.prediction_model_2(
-                    (tb, 64*4, th//2//16, tw//2//16), h1, self.sampler_2)
-            else:
-                z2_sigma = torch.abs(self.z2_sigma)
-                z2_mu = torch.zeros_like(z2_sigma)
+            z2_sigma = torch.abs(self.get_h2_sigma)
+            z2_mu = torch.zeros_like(z2_sigma)
 
             z2_likelihoods = self.entropy_bottleneck_z2(
                 z2_rounded, z2_sigma, z2_mu)
@@ -754,7 +601,7 @@ class NetMedian(nn.Module):
             x_tilde = y
         elif stage >= 3: # side-info recon model on
             pf, y = self.s_model(z3_rounded)
-            x_tilde = self.side_recon_model(pf, h2, h1)
+            x_tilde = self.side_recon_model(pf, h2)
 
         num_pixels = inputs.size()[0] * h * w
 
@@ -763,31 +610,17 @@ class NetMedian(nn.Module):
             train_mse = torch.mean((inputs - x_tilde) ** 2, [0, 1, 2, 3])
             train_mse *= 255**2
 
-            if stage == 1: # RDO on h2 and h3
+            if stage == 1 or stage == 2 or stage == 3: # RDO on h2 and h3
                 bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
                         for l in [z2_likelihoods, z3_likelihoods]]
                 train_bpp = bpp_list[0] + bpp_list[1]
                 train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
                 train_loss = args.lmbda * train_mse + train_bpp + train_aux3
 
-            elif stage == 2: # Full RDO on h1, h2 and h3
-                bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                        for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
-                train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
-                train_aux2 = torch.nn.MSELoss(reduction='mean')(z2.detach(), proj_z2)
-                train_loss = args.lmbda * train_mse + train_bpp + train_aux2 + train_aux3
-            elif stage == 3: # with side recon model; full RDO
-                bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                            for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
-                train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
-                train_aux2 = torch.nn.MSELoss(reduction='mean')(z2.detach(), proj_z2)
-                train_loss = args.lmbda * train_mse + train_bpp + train_aux2 + train_aux3
             else: # no aux loss
                 bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                            for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
+                            for l in [z2_likelihoods, z3_likelihoods]]
+                train_bpp = bpp_list[0] + bpp_list[1]
                 train_loss = args.lmbda * train_mse + train_bpp
 
             return train_loss, train_bpp, train_mse
@@ -795,20 +628,12 @@ class NetMedian(nn.Module):
         elif mode == 'test':
             test_num_pixels = inputs.size()[0] * 256 ** 2
 
-            if stage == 1:
-                eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                
-                bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp1 = torch.zeros_like(bpp2)
-                
-            else:
-                eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [
-                    0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z1_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                
-                bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp1 = torch.sum(torch.log(z1_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [
+                0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            
+            bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            bpp1 = torch.zero_like(bpp2)
 
             # Bring both images back to 0..255 range.
             gt = torch.round((inputs + 1) * 127.5)
@@ -828,29 +653,19 @@ class NetSmall(nn.Module):
         self.s_model = synthesisTransformModel(
             96, [96, 96, 96, 3])
 
-        self.ha_model_1 = h_analysisTransformModel(
-            64*4, [64*4, 32*4, 32*4], [1, 1, 1])
-        self.hs_model_1 = h_synthesisTransformModel(
-            32*4, [32*4, 64*4, 64*4], [1, 1, 1])
-
         self.ha_model_2 = h_analysisTransformModel(
             96, [96*2, 96*4, 64*4], [1, 1, 1])
         self.hs_model_2 = h_synthesisTransformModel(
             64*4, [96*4, 96*2, 96], [1, 1, 1])
 
-        self.entropy_bottleneck_z1 = GaussianModel()
         self.entropy_bottleneck_z2 = GaussianModel()
         self.entropy_bottleneck_z3 = GaussianModel()
         b, h, w, c = train_size
         tb, th, tw, tc = test_size
 
-        self.h1_sigma = torch.nn.Parameter(torch.ones(
-            (1, 32*4, 1, 1), dtype=torch.float32, requires_grad=True))
-        self.register_parameter('get_h1_sigma', self.h1_sigma)
-
-        self.v_z2_sigma = torch.nn.Parameter(torch.ones(
+        self.h2_sigma = torch.nn.Parameter(torch.ones(
             (1, 64*4, 1, 1), dtype=torch.float32, requires_grad=True))
-        self.register_parameter('z2_sigma', self.v_z2_sigma)
+        self.register_parameter('get_h2_sigma', self.h2_sigma)
 
         self.prediction_model_2 = PredictionModel(
             in_dim=64*4, dim=64*4, outdim=64*4*2)
@@ -861,7 +676,7 @@ class NetSmall(nn.Module):
         self.sampler_2 = NeighborSample((b, 64*4, h//2//8, w//2//8))
         self.sampler_3 = NeighborSample((b, 96, h//8, w//8))
 
-        self.side_recon_model = SideInfoReconModel(96+64, num_filters=96)
+        self.side_recon_model = SideInfoReconModel(96, num_filters=96)
 
         self.proj_head_z3 = ProjHead(96, 96)
         self.proj_head_z2 = ProjHead(64*4, 64*4)
@@ -881,39 +696,10 @@ class NetSmall(nn.Module):
             params.append(v)
         for v in self.prediction_model_3.parameters():
             params.append(v)
-        params.append(self.z2_sigma)
+        params.append(self.get_h2_sigma)
 
         return params
     
-    def stage2_params(self):
-        params = []
-
-        for v in self.a_model.parameters():
-            params.append(v)
-        for v in self.s_model.parameters():
-            params.append(v)
-
-        for v in self.ha_model_2.parameters():
-            params.append(v)
-        for v in self.hs_model_2.parameters():
-            params.append(v)
-        for v in self.proj_head_z3.parameters():
-            params.append(v)
-        for v in self.prediction_model_3.parameters():
-            params.append(v)
-
-        for v in self.ha_model_1.parameters():
-            params.append(v)
-        for v in self.hs_model_1.parameters():
-            params.append(v)
-        for v in self.proj_head_z2.parameters():
-            params.append(v)
-        for v in self.prediction_model_2.parameters():
-            params.append(v)
-        params.append(self.get_h1_sigma)
-
-        return params
-
     # We adopt a multi-stage training procedure
     def forward(self, inputs, mode='train', stage=1):
         b, h, w, c = self.train_size
@@ -929,33 +715,13 @@ class NetSmall(nn.Module):
         z2_noisy = z2 + noise
         z2_rounded = bypass_round(z2)
 
-        if stage > 1: # h1 enabled after stage 2
-            z1 = self.ha_model_1(z2_rounded)
-            noise = torch.rand_like(z1) - 0.5
-            z1_noisy = z1 + noise
-            z1_rounded = bypass_round(z1)
-
-            z1_sigma = torch.abs(self.get_h1_sigma)
-            z1_mu = torch.zeros_like(z1_sigma)
-
-            h1 = self.hs_model_1(z1_rounded)
-            if stage < 4:
-                proj_z2 = self.proj_head_z2(h1)
-        
         h2 = self.hs_model_2(z2_rounded)
         if stage < 4: # helping loss enabled before stage 4
             proj_z3 = self.proj_head_z3(h2)
 
         if mode == 'train':
-            if stage > 1: # when h1 enabled after stage 2
-                z1_likelihoods = self.entropy_bottleneck_z1(
-                    z1_noisy, z1_sigma, z1_mu)
-
-                z2_mu, z2_sigma = self.prediction_model_2(
-                    (b, 64*4, h//2//16, w//2//16), h1, self.sampler_2)
-            else:
-                z2_sigma = torch.abs(self.z2_sigma)
-                z2_mu = torch.zeros_like(z2_sigma)
+            z2_sigma = torch.abs(self.get_h2_sigma)
+            z2_mu = torch.zeros_like(z2_sigma)
 
             z2_likelihoods = self.entropy_bottleneck_z2(
                 z2_noisy, z2_sigma, z2_mu)
@@ -966,15 +732,8 @@ class NetSmall(nn.Module):
             z3_likelihoods = self.entropy_bottleneck_z3(
                 z3_noisy, z3_sigma, z3_mu)
         else:
-            if stage > 1: # when h1 enabled after stage 2
-                z1_likelihoods = self.entropy_bottleneck_z1(
-                    z1_rounded, z1_sigma, z1_mu)
-
-                z2_mu, z2_sigma = self.prediction_model_2(
-                    (tb, 64*4, th//2//16, tw//2//16), h1, self.sampler_2)
-            else:
-                z2_sigma = torch.abs(self.z2_sigma)
-                z2_mu = torch.zeros_like(z2_sigma)
+            z2_sigma = torch.abs(self.get_h2_sigma)
+            z2_mu = torch.zeros_like(z2_sigma)
 
             z2_likelihoods = self.entropy_bottleneck_z2(
                 z2_rounded, z2_sigma, z2_mu)
@@ -990,7 +749,7 @@ class NetSmall(nn.Module):
             x_tilde = y
         elif stage >= 3: # side-info recon model on
             pf, y = self.s_model(z3_rounded)
-            x_tilde = self.side_recon_model(pf, h2, h1)
+            x_tilde = self.side_recon_model(pf, h2)
 
         num_pixels = inputs.size()[0] * h * w
 
@@ -999,31 +758,16 @@ class NetSmall(nn.Module):
             train_mse = torch.mean((inputs - x_tilde) ** 2, [0, 1, 2, 3])
             train_mse *= 255**2
 
-            if stage == 1: # RDO on h2 and h3
+            if stage == 1 or stage == 2 or stage == 3: # RDO on h2 and h3
                 bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
                         for l in [z2_likelihoods, z3_likelihoods]]
                 train_bpp = bpp_list[0] + bpp_list[1]
                 train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
                 train_loss = args.lmbda * train_mse + train_bpp + train_aux3
-
-            elif stage == 2: # Full RDO on h1, h2 and h3
-                bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                        for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
-                train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
-                train_aux2 = torch.nn.MSELoss(reduction='mean')(z2.detach(), proj_z2)
-                train_loss = args.lmbda * train_mse + train_bpp + train_aux2 + train_aux3
-            elif stage == 3: # with side recon model; full RDO
-                bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                            for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
-                train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
-                train_aux2 = torch.nn.MSELoss(reduction='mean')(z2.detach(), proj_z2)
-                train_loss = args.lmbda * train_mse + train_bpp + train_aux2 + train_aux3
             else: # no aux loss
                 bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                            for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
+                            for l in [z2_likelihoods, z3_likelihoods]]
+                train_bpp = bpp_list[0] + bpp_list[1]
                 train_loss = args.lmbda * train_mse + train_bpp
 
             return train_loss, train_bpp, train_mse
@@ -1031,20 +775,12 @@ class NetSmall(nn.Module):
         elif mode == 'test':
             test_num_pixels = inputs.size()[0] * 256 ** 2
 
-            if stage == 1:
-                eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                
-                bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp1 = torch.zeros_like(bpp2)
-                
-            else:
-                eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [
-                    0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z1_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                
-                bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp1 = torch.sum(torch.log(z1_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [
+                0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            
+            bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            bpp1 = torch.zeros_like(bpp2) 
 
             # Bring both images back to 0..255 range.
             gt = torch.round((inputs + 1) * 127.5)
@@ -1064,29 +800,19 @@ class NetXSmall(nn.Module):
         self.s_model = synthesisTransformModel(
             48, [48, 48, 48, 3])
 
-        self.ha_model_1 = h_analysisTransformModel(
-            64*4, [64*4, 32*4, 32*4], [1, 1, 1])
-        self.hs_model_1 = h_synthesisTransformModel(
-            32*4, [32*4, 64*4, 64*4], [1, 1, 1])
-
         self.ha_model_2 = h_analysisTransformModel(
             48, [48*2, 48*4, 64*4], [1, 1, 1])
         self.hs_model_2 = h_synthesisTransformModel(
             64*4, [48*4, 48*2, 48], [1, 1, 1])
 
-        self.entropy_bottleneck_z1 = GaussianModel()
         self.entropy_bottleneck_z2 = GaussianModel()
         self.entropy_bottleneck_z3 = GaussianModel()
         b, h, w, c = train_size
         tb, th, tw, tc = test_size
 
-        self.h1_sigma = torch.nn.Parameter(torch.ones(
-            (1, 32*4, 1, 1), dtype=torch.float32, requires_grad=True))
-        self.register_parameter('get_h1_sigma', self.h1_sigma)
-
-        self.v_z2_sigma = torch.nn.Parameter(torch.ones(
+        self.h2_sigma = torch.nn.Parameter(torch.ones(
             (1, 64*4, 1, 1), dtype=torch.float32, requires_grad=True))
-        self.register_parameter('z2_sigma', self.v_z2_sigma)
+        self.register_parameter('get_h2_sigma', self.h2_sigma)
 
         self.prediction_model_2 = PredictionModel(
             in_dim=64*4, dim=64*4, outdim=64*4*2)
@@ -1097,7 +823,7 @@ class NetXSmall(nn.Module):
         self.sampler_2 = NeighborSample((b, 64*4, h//2//8, w//2//8))
         self.sampler_3 = NeighborSample((b, 48, h//8, w//8))
 
-        self.side_recon_model = SideInfoReconModel(48+64, num_filters=48)
+        self.side_recon_model = SideInfoReconModel(48, num_filters=48)
 
         self.proj_head_z3 = ProjHead(48, 48)
         self.proj_head_z2 = ProjHead(64*4, 64*4)
@@ -1117,39 +843,10 @@ class NetXSmall(nn.Module):
             params.append(v)
         for v in self.prediction_model_3.parameters():
             params.append(v)
-        params.append(self.z2_sigma)
+        params.append(self.get_h2_sigma)
 
         return params
     
-    def stage2_params(self):
-        params = []
-
-        for v in self.a_model.parameters():
-            params.append(v)
-        for v in self.s_model.parameters():
-            params.append(v)
-
-        for v in self.ha_model_2.parameters():
-            params.append(v)
-        for v in self.hs_model_2.parameters():
-            params.append(v)
-        for v in self.proj_head_z3.parameters():
-            params.append(v)
-        for v in self.prediction_model_3.parameters():
-            params.append(v)
-
-        for v in self.ha_model_1.parameters():
-            params.append(v)
-        for v in self.hs_model_1.parameters():
-            params.append(v)
-        for v in self.proj_head_z2.parameters():
-            params.append(v)
-        for v in self.prediction_model_2.parameters():
-            params.append(v)
-        params.append(self.get_h1_sigma)
-
-        return params
-
     # We adopt a multi-stage training procedure
     def forward(self, inputs, mode='train', stage=1):
         b, h, w, c = self.train_size
@@ -1165,33 +862,13 @@ class NetXSmall(nn.Module):
         z2_noisy = z2 + noise
         z2_rounded = bypass_round(z2)
 
-        if stage > 1: # h1 enabled after stage 2
-            z1 = self.ha_model_1(z2_rounded)
-            noise = torch.rand_like(z1) - 0.5
-            z1_noisy = z1 + noise
-            z1_rounded = bypass_round(z1)
-
-            z1_sigma = torch.abs(self.get_h1_sigma)
-            z1_mu = torch.zeros_like(z1_sigma)
-
-            h1 = self.hs_model_1(z1_rounded)
-            if stage < 4:
-                proj_z2 = self.proj_head_z2(h1)
-        
         h2 = self.hs_model_2(z2_rounded)
         if stage < 4: # helping loss enabled before stage 4
             proj_z3 = self.proj_head_z3(h2)
 
         if mode == 'train':
-            if stage > 1: # when h1 enabled after stage 2
-                z1_likelihoods = self.entropy_bottleneck_z1(
-                    z1_noisy, z1_sigma, z1_mu)
-
-                z2_mu, z2_sigma = self.prediction_model_2(
-                    (b, 64*4, h//2//16, w//2//16), h1, self.sampler_2)
-            else:
-                z2_sigma = torch.abs(self.z2_sigma)
-                z2_mu = torch.zeros_like(z2_sigma)
+            z2_sigma = torch.abs(self.get_h2_sigma)
+            z2_mu = torch.zeros_like(z2_sigma)
 
             z2_likelihoods = self.entropy_bottleneck_z2(
                 z2_noisy, z2_sigma, z2_mu)
@@ -1202,15 +879,8 @@ class NetXSmall(nn.Module):
             z3_likelihoods = self.entropy_bottleneck_z3(
                 z3_noisy, z3_sigma, z3_mu)
         else:
-            if stage > 1: # when h1 enabled after stage 2
-                z1_likelihoods = self.entropy_bottleneck_z1(
-                    z1_rounded, z1_sigma, z1_mu)
-
-                z2_mu, z2_sigma = self.prediction_model_2(
-                    (tb, 64*4, th//2//16, tw//2//16), h1, self.sampler_2)
-            else:
-                z2_sigma = torch.abs(self.z2_sigma)
-                z2_mu = torch.zeros_like(z2_sigma)
+            z2_sigma = torch.abs(self.get_h2_sigma)
+            z2_mu = torch.zeros_like(z2_sigma)
 
             z2_likelihoods = self.entropy_bottleneck_z2(
                 z2_rounded, z2_sigma, z2_mu)
@@ -1226,7 +896,7 @@ class NetXSmall(nn.Module):
             x_tilde = y
         elif stage >= 3: # side-info recon model on
             pf, y = self.s_model(z3_rounded)
-            x_tilde = self.side_recon_model(pf, h2, h1)
+            x_tilde = self.side_recon_model(pf, h2)
 
         num_pixels = inputs.size()[0] * h * w
 
@@ -1235,31 +905,17 @@ class NetXSmall(nn.Module):
             train_mse = torch.mean((inputs - x_tilde) ** 2, [0, 1, 2, 3])
             train_mse *= 255**2
 
-            if stage == 1: # RDO on h2 and h3
+            if stage == 1 or stage == 2 or stage == 3: # RDO on h2 and h3
                 bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
                         for l in [z2_likelihoods, z3_likelihoods]]
                 train_bpp = bpp_list[0] + bpp_list[1]
                 train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
                 train_loss = args.lmbda * train_mse + train_bpp + train_aux3
 
-            elif stage == 2: # Full RDO on h1, h2 and h3
-                bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                        for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
-                train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
-                train_aux2 = torch.nn.MSELoss(reduction='mean')(z2.detach(), proj_z2)
-                train_loss = args.lmbda * train_mse + train_bpp + train_aux2 + train_aux3
-            elif stage == 3: # with side recon model; full RDO
-                bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                            for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
-                train_aux3 = torch.nn.MSELoss(reduction='mean')(z3.detach(), proj_z3)
-                train_aux2 = torch.nn.MSELoss(reduction='mean')(z2.detach(), proj_z2)
-                train_loss = args.lmbda * train_mse + train_bpp + train_aux2 + train_aux3
             else: # no aux loss
                 bpp_list = [torch.sum(torch.log(l), [0, 1, 2, 3]) / (-np.log(2) * num_pixels)
-                            for l in [z1_likelihoods, z2_likelihoods, z3_likelihoods]]
-                train_bpp = bpp_list[0] + bpp_list[1] + bpp_list[2]
+                            for l in [z2_likelihoods, z3_likelihoods]]
+                train_bpp = bpp_list[0] + bpp_list[1]
                 train_loss = args.lmbda * train_mse + train_bpp
 
             return train_loss, train_bpp, train_mse
@@ -1267,21 +923,12 @@ class NetXSmall(nn.Module):
         elif mode == 'test':
             test_num_pixels = inputs.size()[0] * 256 ** 2
 
-            if stage == 1:
-                eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            
+            bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
+            bpp1 = torch.zeros_like(bpp2)
                 
-                bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp1 = torch.zeros_like(bpp2)
-                
-            else:
-                eval_bpp = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [
-                    0, 1, 2, 3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z1_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                
-                bpp3 = torch.sum(torch.log(z3_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp2 = torch.sum(torch.log(z2_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-                bpp1 = torch.sum(torch.log(z1_likelihoods), [0, 1, 2, 3]) / (-np.log(2) * test_num_pixels)
-
             # Bring both images back to 0..255 range.
             gt = torch.round((inputs + 1) * 127.5)
             x_hat = torch.clamp((x_tilde + 1) * 127.5, 0, 255)
@@ -1345,7 +992,7 @@ def train():
     
     opt = optim.Adam(net.parameters(), lr=1e-4)
     opt_s1 = optim.Adam(net.module.stage1_params(), lr=1e-4)
-    opt_s2 = optim.Adam(net.module.stage2_params(), lr=1e-4)
+    #opt_s2 = optim.Adam(net.module.stage2_params(), lr=1e-4)
 
     sch = optim.lr_scheduler.MultiStepLR(opt, [4000-1300, 4500-1300, 4750-1300, 5000-1300], 0.5)
 
@@ -1361,13 +1008,13 @@ def train():
 
         if epoch < 1000:
             None
-        elif epoch < 1200:
+        elif epoch < 1100:
             stage = 2
         elif epoch < 1300:
             stage = 3
         elif epoch >= 1300:
             stage = 4
-        #stage = 4
+        stage = 4
         cnt = 0
         for i, data in enumerate(training_loader, 0):
             x = data.to(device)
@@ -1387,10 +1034,8 @@ def train():
 
             train_loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), 10)
-            if stage == 1:
+            if stage == 1 or stage == 2:
                 opt_s1.step()
-            elif stage == 2:
-                opt_s2.step()
             else:
                 opt.step()
             cnt += 1
@@ -1415,7 +1060,7 @@ def train():
                        (args.checkpoint_dir, epoch))
             torch.save(opt.state_dict(), './%s/latest_opt.ckpt' % (args.checkpoint_dir))
             torch.save(opt_s1.state_dict(), './%s/latest_opts1.ckpt' % (args.checkpoint_dir))
-            torch.save(opt_s2.state_dict(), './%s/latest_opts2.ckpt' % (args.checkpoint_dir))
+            #torch.save(opt_s2.state_dict(), './%s/latest_opts2.ckpt' % (args.checkpoint_dir))
         
         if stage >= 3:
             sch.step()

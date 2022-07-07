@@ -12,22 +12,32 @@ Train individual app with 1080p image: "IMAGE_PATH/GameImage_dataset/train/super
 Train individual app using 720p and 1080p: "IMAGE_PATH/GameImage_dataset/train/supertuxkart*/*.png"
 
 ### Commands:
-The below shows an example about how to train supertuxkart small framework from scratch (without pretraining) with different lambdas:
+The below shows an example about how to train supertuxkart small-pruning framework from scratch (without pretraining) with different lambdas:
 ```
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small --lambda 0.004
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small --lambda 0.008
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small --lambda 0.016
+CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small-pruning --lambda 0.004
+CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small-pruning --lambda 0.008
+CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small-pruning --lambda 0.016
 ```
 
-You can also try large, median, and xsamll framework with "--model_size 3/2/0"
+You can also try large, median, and xsamll framework with pruning(deleting the last auto-encoder/decoder pair)"--model_size 3/2/0"
 ```
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large --lambda 0.004
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large --lambda 0.008
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large --lambda 0.016
+CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large-pruning --lambda 0.004
+CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large-pruning --lambda 0.008
+CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large-pruning --lambda 0.016
 ```
 
 If you would like train from a specified checkpoint (e.g., 1000.ckpt), you can try:
 ```
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large --lambda 0.16 --load_weights "./checkpoint/large/1000.ckpt
+CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small-pruning --lambda 0.16 --load_weights "./checkpoint/small-pruning/1000.ckpt
 ```
-Please refer train.sh for more examples.
+Please refer train_spruning.sh or train_mpruning.sh for more examples.
+
+Abbreviations:
+
+large-pruning : lpruning
+
+median-pruning: mpruning
+
+small-pruning : spruning
+
+xsmall-pruning: xpruning

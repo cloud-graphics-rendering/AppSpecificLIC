@@ -33,7 +33,6 @@ from translate_weights import *
 mask_a = 1
 mask_b = 1
 
-import tqdm
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
@@ -284,10 +283,8 @@ class SideInfoReconModel(nn.Module):
     self.layer_6 = nn.Conv2d(num_filters//12, 3, 1, 1, 0)
     self.d2s = Depth2Space(2)
 
-  def forward(self, pf, h2, h1):
-    h1prime = self.d2s(h1)
-    h = torch.cat([h2, h1prime], 1)
-    h = self.layer_1(h)
+  def forward(self, pf, h2):
+    h = self.layer_1(h2)
     h = self.layer_1a(h)
     h = self.layer_1b(h)
 
@@ -318,20 +315,14 @@ class NetXSmall(nn.Module):
     self.a_model = analysisTransformModel(3, [48, 48, 48, 48])
     self.s_model = synthesisTransformModel(48, [48, 48, 48, 3])
     
-    self.ha_model_1 = h_analysisTransformModel(64*4, [64*4, 32*4, 32*4], [1, 1, 1])
-    self.hs_model_1 = h_synthesisTransformModel(32*4, [32*4, 64*4, 64*4], [1, 1, 1])
-
     self.ha_model_2 = h_analysisTransformModel(48, [48*2, 48*4, 64*4], [1, 1, 1])
     self.hs_model_2 = h_synthesisTransformModel(64*4, [48*4, 48*2, 48], [1, 1, 1])
 
-    self.entropy_bottleneck_z1 = GaussianModel()
     self.entropy_bottleneck_z2 = GaussianModel()
     self.entropy_bottleneck_z3 = GaussianModel()
 
-    self.h1_sigma = nn.Parameter(torch.ones((1,32*4,1,1), dtype=torch.float32, requires_grad=False))
-
-    self.register_parameter('get_h1_sigma', self.h1_sigma)
-
+    self.h2_sigma = nn.Parameter(torch.ones((1,64*4,1,1), dtype=torch.float32, requires_grad=False))
+    self.register_parameter('get_h2_sigma', self.h2_sigma)
     self.prediction_model_2 = PredictionModel(in_dim=64*4, dim=64*4, outdim=64*4*2)
 
     self.prediction_model_3 = PredictionModel(in_dim=48, dim=48, outdim=48*2)
@@ -339,7 +330,7 @@ class NetXSmall(nn.Module):
     self.sampler_2 = NeighborSample()
     self.sampler_3 = NeighborSample()
 
-    self.side_recon_model = SideInfoReconModel(48+64, num_filters=48)
+    self.side_recon_model = SideInfoReconModel(48, num_filters=48)
 
   def forward(self, inputs, mode='train'):
     pass
@@ -354,20 +345,13 @@ class NetXSmall(nn.Module):
     z2 = self.ha_model_2(z3_rounded)
     z2_rounded = bypass_round(z2)
     
-    z1 = self.ha_model_1(z2_rounded)
-    z1_rounded = bypass_round(z1)
-
-    z1_sigma = torch.abs(self.get_h1_sigma)
-    z1_mu = torch.zeros_like(z1_sigma)
-
-    h1 = self.hs_model_1(washed(z1_rounded))
     h2 = self.hs_model_2(washed(z2_rounded))
     h3 = self.s_model(washed(z3_rounded))
 
-    z1_likelihoods = self.entropy_bottleneck_z1(z1_rounded, z1_sigma, z1_mu)
 
-    z2_mu, z2_sigma = self.prediction_model_2((tb, 64*4,th//2//16,tw//2//16), h1, self.sampler_2)
-
+    #z2_mu, z2_sigma = self.prediction_model_2((tb, 64*4,th//2//16,tw//2//16), h1, self.sampler_2)
+    z2_sigma = torch.abs(self.get_h2_sigma)
+    z2_mu = torch.zeros_like(z2_sigma)
     z2_likelihoods = self.entropy_bottleneck_z2(z2_rounded, z2_sigma, z2_mu)
     
     z3_mu, z3_sigma = self.prediction_model_3((tb, 48,th//16,tw//16), h2, self.sampler_3)
@@ -375,13 +359,13 @@ class NetXSmall(nn.Module):
     z3_likelihoods = self.entropy_bottleneck_z3(z3_rounded, z3_sigma, z3_mu)
 
     pf = self.s_model(z3_rounded)
-    x_tilde = self.side_recon_model(pf, h2, h1)
+    x_tilde = self.side_recon_model(pf, h2)
     
     num_pixels = inputs.size()[0] * h * w
     
     test_num_pixels = inputs.size()[0] * h * w
 
-    eval_bpp = torch.sum(torch.log(z3_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z1_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels)
+    eval_bpp = torch.sum(torch.log(z3_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels)
 
     gt = torch.round((inputs + 1) * 127.5)
     x_hat = torch.clamp((x_tilde + 1) * 127.5, 0, 255)
@@ -390,13 +374,10 @@ class NetXSmall(nn.Module):
     v_psnr = torch.mean(20 * torch.log10(255 / torch.sqrt(v_mse)), 0)
 
     ret = {}
-    ret['z1_mu'] = z1_mu.detach().cpu().numpy()
-    ret['z1_sigma'] = z1_sigma.detach().cpu().numpy()
     ret['z2_mu'] = z2_mu.detach().cpu().numpy()
     ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
     ret['z3_mu'] = z3_mu.detach().cpu().numpy()
     ret['z3_sigma'] = z3_sigma.detach().cpu().numpy()
-    ret['z1_rounded'] = z1_rounded.detach().cpu().numpy()
     ret['z2_rounded'] = z2_rounded.detach().cpu().numpy()
     ret['z3_rounded'] = z3_rounded.detach().cpu().numpy()
     ret['v_psnr'] = v_psnr.detach().cpu().numpy()
@@ -405,19 +386,16 @@ class NetXSmall(nn.Module):
 
   def decode(self, inputs, stage):
     if stage == 0:
-      z1_sigma = torch.abs(self.get_h1_sigma)
-      z1_mu = torch.zeros_like(z1_sigma)
-      
       ret = {}
-      ret['z1_sigma'] = z1_sigma.detach().cpu().numpy()
-      ret['z1_mu'] = z1_mu.detach().cpu().numpy()
       return ret
     
     elif stage == 1:
-      z1_rounded = inputs['z1_rounded']
-      h1 = self.hs_model_1(z1_rounded)
-      self.h1 = h1
-      z2_mu, z2_sigma = self.prediction_model_2((h1.shape[0],64*4,h1.shape[2],h1.shape[3]), h1, self.sampler_2)
+      #z1_rounded = inputs['z1_rounded']
+      #h1 = self.hs_model_1(z1_rounded)
+      #self.h1 = h1
+      #z2_mu, z2_sigma = self.prediction_model_2((h1.shape[0],64*4,h1.shape[2],h1.shape[3]), h1, self.sampler_2)
+      z2_sigma = torch.abs(self.get_h2_sigma)
+      z2_mu = torch.zeros_like(z2_sigma)
       ret = {}
       ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
       ret['z2_mu'] = z2_mu.detach().cpu().numpy()
@@ -437,7 +415,7 @@ class NetXSmall(nn.Module):
     elif stage == 3:
       z3_rounded = inputs['z3_rounded']
       pf = self.s_model(z3_rounded)
-      x_tilde = self.side_recon_model(pf, self.h2, self.h1)
+      x_tilde = self.side_recon_model(pf, self.h2)
       x_tilde = torch.round(torch.clamp((x_tilde + 1) * 127.5, 0, 255))
       return x_tilde.detach().cpu().numpy()
 
@@ -448,19 +426,14 @@ class NetSmall(nn.Module):
     self.a_model = analysisTransformModel(3, [96, 96, 96, 96])
     self.s_model = synthesisTransformModel(96, [96, 96, 96, 3])
     
-    self.ha_model_1 = h_analysisTransformModel(64*4, [64*4, 32*4, 32*4], [1, 1, 1])
-    self.hs_model_1 = h_synthesisTransformModel(32*4, [32*4, 64*4, 64*4], [1, 1, 1])
-
     self.ha_model_2 = h_analysisTransformModel(96, [96*2, 96*4, 64*4], [1, 1, 1])
     self.hs_model_2 = h_synthesisTransformModel(64*4, [96*4, 96*2, 96], [1, 1, 1])
 
-    self.entropy_bottleneck_z1 = GaussianModel()
     self.entropy_bottleneck_z2 = GaussianModel()
     self.entropy_bottleneck_z3 = GaussianModel()
 
-    self.h1_sigma = nn.Parameter(torch.ones((1,32*4,1,1), dtype=torch.float32, requires_grad=False))
-
-    self.register_parameter('get_h1_sigma', self.h1_sigma)
+    self.h2_sigma = nn.Parameter(torch.ones((1,64*4,1,1), dtype=torch.float32, requires_grad=False))
+    self.register_parameter('get_h2_sigma', self.h2_sigma)
 
     self.prediction_model_2 = PredictionModel(in_dim=64*4, dim=64*4, outdim=64*4*2)
 
@@ -469,7 +442,7 @@ class NetSmall(nn.Module):
     self.sampler_2 = NeighborSample()
     self.sampler_3 = NeighborSample()
 
-    self.side_recon_model = SideInfoReconModel(96+64,num_filters=96)
+    self.side_recon_model = SideInfoReconModel(96,num_filters=96)
 
   def forward(self, inputs, mode='train'):
     pass
@@ -484,20 +457,11 @@ class NetSmall(nn.Module):
     z2 = self.ha_model_2(z3_rounded)
     z2_rounded = bypass_round(z2)
     
-    z1 = self.ha_model_1(z2_rounded)
-    z1_rounded = bypass_round(z1)
-
-    z1_sigma = torch.abs(self.get_h1_sigma)
-    z1_mu = torch.zeros_like(z1_sigma)
-
-    h1 = self.hs_model_1(washed(z1_rounded))
     h2 = self.hs_model_2(washed(z2_rounded))
     h3 = self.s_model(washed(z3_rounded))
 
-    z1_likelihoods = self.entropy_bottleneck_z1(z1_rounded, z1_sigma, z1_mu)
-
-    z2_mu, z2_sigma = self.prediction_model_2((tb, 64*4,th//2//16,tw//2//16), h1, self.sampler_2)
-
+    z2_sigma = torch.abs(self.get_h2_sigma)
+    z2_mu = torch.zeros_like(z2_sigma)
     z2_likelihoods = self.entropy_bottleneck_z2(z2_rounded, z2_sigma, z2_mu)
     
     z3_mu, z3_sigma = self.prediction_model_3((tb, 96,th//16,tw//16), h2, self.sampler_3)
@@ -505,13 +469,13 @@ class NetSmall(nn.Module):
     z3_likelihoods = self.entropy_bottleneck_z3(z3_rounded, z3_sigma, z3_mu)
 
     pf = self.s_model(z3_rounded)
-    x_tilde = self.side_recon_model(pf, h2, h1)
+    x_tilde = self.side_recon_model(pf, h2)
     
     num_pixels = inputs.size()[0] * h * w
     
     test_num_pixels = inputs.size()[0] * h * w
 
-    eval_bpp = torch.sum(torch.log(z3_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z1_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels)
+    eval_bpp = torch.sum(torch.log(z3_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels)
 
     gt = torch.round((inputs + 1) * 127.5)
     x_hat = torch.clamp((x_tilde + 1) * 127.5, 0, 255)
@@ -520,13 +484,10 @@ class NetSmall(nn.Module):
     v_psnr = torch.mean(20 * torch.log10(255 / torch.sqrt(v_mse)), 0)
 
     ret = {}
-    ret['z1_mu'] = z1_mu.detach().cpu().numpy()
-    ret['z1_sigma'] = z1_sigma.detach().cpu().numpy()
     ret['z2_mu'] = z2_mu.detach().cpu().numpy()
     ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
     ret['z3_mu'] = z3_mu.detach().cpu().numpy()
     ret['z3_sigma'] = z3_sigma.detach().cpu().numpy()
-    ret['z1_rounded'] = z1_rounded.detach().cpu().numpy()
     ret['z2_rounded'] = z2_rounded.detach().cpu().numpy()
     ret['z3_rounded'] = z3_rounded.detach().cpu().numpy()
     ret['v_psnr'] = v_psnr.detach().cpu().numpy()
@@ -535,19 +496,17 @@ class NetSmall(nn.Module):
 
   def decode(self, inputs, stage):
     if stage == 0:
-      z1_sigma = torch.abs(self.get_h1_sigma)
-      z1_mu = torch.zeros_like(z1_sigma)
-      
+      z2_sigma = torch.abs(self.get_h2_sigma)
+      z2_mu = torch.zeros_like(z2_sigma)
       ret = {}
-      ret['z1_sigma'] = z1_sigma.detach().cpu().numpy()
-      ret['z1_mu'] = z1_mu.detach().cpu().numpy()
+      ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
+      ret['z2_mu'] = z2_mu.detach().cpu().numpy()
       return ret
     
     elif stage == 1:
-      z1_rounded = inputs['z1_rounded']
-      h1 = self.hs_model_1(z1_rounded)
-      self.h1 = h1
-      z2_mu, z2_sigma = self.prediction_model_2((h1.shape[0],64*4,h1.shape[2],h1.shape[3]), h1, self.sampler_2)
+      #z2_mu, z2_sigma = self.prediction_model_2((h1.shape[0],64*4,h1.shape[2],h1.shape[3]), h1, self.sampler_2)
+      z2_sigma = torch.abs(self.get_h2_sigma)
+      z2_mu = torch.zeros_like(z2_sigma)
       ret = {}
       ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
       ret['z2_mu'] = z2_mu.detach().cpu().numpy()
@@ -567,7 +526,7 @@ class NetSmall(nn.Module):
     elif stage == 3:
       z3_rounded = inputs['z3_rounded']
       pf = self.s_model(z3_rounded)
-      x_tilde = self.side_recon_model(pf, self.h2, self.h1)
+      x_tilde = self.side_recon_model(pf, self.h2)
       x_tilde = torch.round(torch.clamp((x_tilde + 1) * 127.5, 0, 255))
       return x_tilde.detach().cpu().numpy()
 
@@ -578,19 +537,14 @@ class NetMedian(nn.Module):
     self.a_model = analysisTransformModel(3, [192, 192, 192, 192])
     self.s_model = synthesisTransformModel(192, [192, 192, 192, 3])
     
-    self.ha_model_1 = h_analysisTransformModel(64*4, [64*4, 32*4, 32*4], [1, 1, 1])
-    self.hs_model_1 = h_synthesisTransformModel(32*4, [32*4, 64*4, 64*4], [1, 1, 1])
-
     self.ha_model_2 = h_analysisTransformModel(192, [192*2, 192*4, 64*4], [1, 1, 1])
     self.hs_model_2 = h_synthesisTransformModel(64*4, [192*4, 192*2, 192], [1, 1, 1])
 
-    self.entropy_bottleneck_z1 = GaussianModel()
     self.entropy_bottleneck_z2 = GaussianModel()
     self.entropy_bottleneck_z3 = GaussianModel()
 
-    self.h1_sigma = nn.Parameter(torch.ones((1,32*4,1,1), dtype=torch.float32, requires_grad=False))
-
-    self.register_parameter('get_h1_sigma', self.h1_sigma)
+    self.h2_sigma = nn.Parameter(torch.ones((1,64*4,1,1), dtype=torch.float32, requires_grad=False))
+    self.register_parameter('get_h2_sigma', self.h2_sigma)
 
     self.prediction_model_2 = PredictionModel(in_dim=64*4, dim=64*4, outdim=64*4*2)
 
@@ -599,7 +553,7 @@ class NetMedian(nn.Module):
     self.sampler_2 = NeighborSample()
     self.sampler_3 = NeighborSample()
 
-    self.side_recon_model = SideInfoReconModel(192+64, num_filters=192)
+    self.side_recon_model = SideInfoReconModel(192, num_filters=192)
 
   def forward(self, inputs, mode='train'):
     pass
@@ -614,19 +568,11 @@ class NetMedian(nn.Module):
     z2 = self.ha_model_2(z3_rounded)
     z2_rounded = bypass_round(z2)
     
-    z1 = self.ha_model_1(z2_rounded)
-    z1_rounded = bypass_round(z1)
-
-    z1_sigma = torch.abs(self.get_h1_sigma)
-    z1_mu = torch.zeros_like(z1_sigma)
-
-    h1 = self.hs_model_1(washed(z1_rounded))
     h2 = self.hs_model_2(washed(z2_rounded))
     h3 = self.s_model(washed(z3_rounded))
 
-    z1_likelihoods = self.entropy_bottleneck_z1(z1_rounded, z1_sigma, z1_mu)
-
-    z2_mu, z2_sigma = self.prediction_model_2((tb, 64*4,th//2//16,tw//2//16), h1, self.sampler_2)
+    z2_sigma = torch.abs(self.get_h2_sigma)
+    z2_mu = torch.zeros_like(z2_sigma)
 
     z2_likelihoods = self.entropy_bottleneck_z2(z2_rounded, z2_sigma, z2_mu)
     
@@ -635,13 +581,13 @@ class NetMedian(nn.Module):
     z3_likelihoods = self.entropy_bottleneck_z3(z3_rounded, z3_sigma, z3_mu)
 
     pf = self.s_model(z3_rounded)
-    x_tilde = self.side_recon_model(pf, h2, h1)
+    x_tilde = self.side_recon_model(pf, h2)
     
     num_pixels = inputs.size()[0] * h * w
     
     test_num_pixels = inputs.size()[0] * h * w
 
-    eval_bpp = torch.sum(torch.log(z3_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z1_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels)
+    eval_bpp = torch.sum(torch.log(z3_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels)
 
     gt = torch.round((inputs + 1) * 127.5)
     x_hat = torch.clamp((x_tilde + 1) * 127.5, 0, 255)
@@ -650,13 +596,10 @@ class NetMedian(nn.Module):
     v_psnr = torch.mean(20 * torch.log10(255 / torch.sqrt(v_mse)), 0)
 
     ret = {}
-    ret['z1_mu'] = z1_mu.detach().cpu().numpy()
-    ret['z1_sigma'] = z1_sigma.detach().cpu().numpy()
     ret['z2_mu'] = z2_mu.detach().cpu().numpy()
     ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
     ret['z3_mu'] = z3_mu.detach().cpu().numpy()
     ret['z3_sigma'] = z3_sigma.detach().cpu().numpy()
-    ret['z1_rounded'] = z1_rounded.detach().cpu().numpy()
     ret['z2_rounded'] = z2_rounded.detach().cpu().numpy()
     ret['z3_rounded'] = z3_rounded.detach().cpu().numpy()
     ret['v_psnr'] = v_psnr.detach().cpu().numpy()
@@ -665,19 +608,12 @@ class NetMedian(nn.Module):
 
   def decode(self, inputs, stage):
     if stage == 0:
-      z1_sigma = torch.abs(self.get_h1_sigma)
-      z1_mu = torch.zeros_like(z1_sigma)
-      
       ret = {}
-      ret['z1_sigma'] = z1_sigma.detach().cpu().numpy()
-      ret['z1_mu'] = z1_mu.detach().cpu().numpy()
       return ret
     
     elif stage == 1:
-      z1_rounded = inputs['z1_rounded']
-      h1 = self.hs_model_1(z1_rounded)
-      self.h1 = h1
-      z2_mu, z2_sigma = self.prediction_model_2((h1.shape[0],64*4,h1.shape[2],h1.shape[3]), h1, self.sampler_2)
+      z2_sigma = torch.abs(self.get_h2_sigma)
+      z2_mu = torch.zeros_like(z2_sigma)
       ret = {}
       ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
       ret['z2_mu'] = z2_mu.detach().cpu().numpy()
@@ -697,7 +633,7 @@ class NetMedian(nn.Module):
     elif stage == 3:
       z3_rounded = inputs['z3_rounded']
       pf = self.s_model(z3_rounded)
-      x_tilde = self.side_recon_model(pf, self.h2, self.h1)
+      x_tilde = self.side_recon_model(pf, self.h2)
       x_tilde = torch.round(torch.clamp((x_tilde + 1) * 127.5, 0, 255))
       return x_tilde.detach().cpu().numpy()
 
@@ -707,19 +643,13 @@ class NetLarge(nn.Module):
     self.a_model = analysisTransformModel(3, [384, 384, 384, 384])
     self.s_model = synthesisTransformModel(384, [384, 384, 384, 3])
     
-    self.ha_model_1 = h_analysisTransformModel(64*4, [64*4*2, 32*4*2, 32*4], [1, 1, 1])
-    self.hs_model_1 = h_synthesisTransformModel(32*4, [64*4*2, 64*4*2, 64*4], [1, 1, 1])
-
     self.ha_model_2 = h_analysisTransformModel(384, [384*2, 192*4*2, 64*4], [1, 1, 1])
     self.hs_model_2 = h_synthesisTransformModel(64*4, [192*4*2, 192*4*2, 384], [1, 1, 1])
 
-    self.entropy_bottleneck_z1 = GaussianModel()
     self.entropy_bottleneck_z2 = GaussianModel()
     self.entropy_bottleneck_z3 = GaussianModel()
-
-    self.h1_sigma = nn.Parameter(torch.ones((1,32*4,1,1), dtype=torch.float32, requires_grad=False))
-
-    self.register_parameter('get_h1_sigma', self.h1_sigma)
+    self.h2_sigma = nn.Parameter(torch.ones((1,64*4,1,1), dtype=torch.float32, requires_grad=False))
+    self.register_parameter('get_h2_sigma', self.h2_sigma)
 
     self.prediction_model_2 = PredictionModel(in_dim=64*4, dim=64*4, outdim=64*4*2)
 
@@ -728,7 +658,7 @@ class NetLarge(nn.Module):
     self.sampler_2 = NeighborSample()
     self.sampler_3 = NeighborSample()
 
-    self.side_recon_model = SideInfoReconModel(384+64, num_filters=384)
+    self.side_recon_model = SideInfoReconModel(384, num_filters=384)
 
   def forward(self, inputs, mode='train'):
     pass
@@ -743,20 +673,12 @@ class NetLarge(nn.Module):
     z2 = self.ha_model_2(z3_rounded)
     z2_rounded = bypass_round(z2)
     
-    z1 = self.ha_model_1(z2_rounded)
-    z1_rounded = bypass_round(z1)
-
-    z1_sigma = torch.abs(self.get_h1_sigma)
-    z1_mu = torch.zeros_like(z1_sigma)
-
-    h1 = self.hs_model_1(washed(z1_rounded))
     h2 = self.hs_model_2(washed(z2_rounded))
     h3 = self.s_model(washed(z3_rounded))
 
-    z1_likelihoods = self.entropy_bottleneck_z1(z1_rounded, z1_sigma, z1_mu)
 
-    z2_mu, z2_sigma = self.prediction_model_2((tb,64*4,th//2//16,tw//2//16), h1, self.sampler_2)
-
+    z2_sigma = torch.abs(self.get_h2_sigma)
+    z2_mu = torch.zeros_like(z2_sigma)
     z2_likelihoods = self.entropy_bottleneck_z2(z2_rounded, z2_sigma, z2_mu)
     
     z3_mu, z3_sigma = self.prediction_model_3((tb,384,th//16,tw//16), h2, self.sampler_3)
@@ -764,13 +686,13 @@ class NetLarge(nn.Module):
     z3_likelihoods = self.entropy_bottleneck_z3(z3_rounded, z3_sigma, z3_mu)
 
     pf = self.s_model(z3_rounded)
-    x_tilde = self.side_recon_model(pf, h2, h1)
+    x_tilde = self.side_recon_model(pf, h2)
     
     num_pixels = inputs.size()[0] * h * w
     
     test_num_pixels = inputs.size()[0] * h * w
 
-    eval_bpp = torch.sum(torch.log(z3_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z1_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels)
+    eval_bpp = torch.sum(torch.log(z3_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels) + torch.sum(torch.log(z2_likelihoods), [0,1,2,3]) / (-np.log(2) * test_num_pixels)
 
     gt = torch.round((inputs + 1) * 127.5)
     x_hat = torch.clamp((x_tilde + 1) * 127.5, 0, 255)
@@ -779,13 +701,10 @@ class NetLarge(nn.Module):
     v_psnr = torch.mean(20 * torch.log10(255 / torch.sqrt(v_mse)), 0)
 
     ret = {}
-    ret['z1_mu'] = z1_mu.detach().cpu().numpy()
-    ret['z1_sigma'] = z1_sigma.detach().cpu().numpy()
     ret['z2_mu'] = z2_mu.detach().cpu().numpy()
     ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
     ret['z3_mu'] = z3_mu.detach().cpu().numpy()
     ret['z3_sigma'] = z3_sigma.detach().cpu().numpy()
-    ret['z1_rounded'] = z1_rounded.detach().cpu().numpy()
     ret['z2_rounded'] = z2_rounded.detach().cpu().numpy()
     ret['z3_rounded'] = z3_rounded.detach().cpu().numpy()
     ret['v_psnr'] = v_psnr.detach().cpu().numpy()
@@ -794,19 +713,12 @@ class NetLarge(nn.Module):
 
   def decode(self, inputs, stage):
     if stage == 0:
-      z1_sigma = torch.abs(self.get_h1_sigma)
-      z1_mu = torch.zeros_like(z1_sigma)
-      
       ret = {}
-      ret['z1_sigma'] = z1_sigma.detach().cpu().numpy()
-      ret['z1_mu'] = z1_mu.detach().cpu().numpy()
       return ret
     
     elif stage == 1:
-      z1_rounded = inputs['z1_rounded']
-      h1 = self.hs_model_1(z1_rounded)
-      self.h1 = h1
-      z2_mu, z2_sigma = self.prediction_model_2((h1.shape[0],64*4,h1.shape[2],h1.shape[3]), h1, self.sampler_2)
+      z2_sigma = torch.abs(self.get_h2_sigma)
+      z2_mu = torch.zeros_like(z2_sigma)
       ret = {}
       ret['z2_sigma'] = z2_sigma.detach().cpu().numpy()
       ret['z2_mu'] = z2_mu.detach().cpu().numpy()
@@ -826,7 +738,7 @@ class NetLarge(nn.Module):
     elif stage == 3:
       z3_rounded = inputs['z3_rounded']
       pf = self.s_model(z3_rounded)
-      x_tilde = self.side_recon_model(pf, self.h2, self.h1)
+      x_tilde = self.side_recon_model(pf, self.h2)
       x_tilde = torch.round(torch.clamp((x_tilde + 1) * 127.5, 0, 255))
       return x_tilde.detach().cpu().numpy()
 
@@ -884,39 +796,20 @@ def compress_low(args, input_image, net):
   #    blocks.append(torch_x[:,:,ph:ph+th,pw:pw+tw])
   #    pw += tw
   #  ph += th
-  blocks.append(torch_x) # added
+  blocks.append(torch_x)
   for block in blocks:
     with torch.no_grad():
       block = block.to(device)
       ret = net.encode(block)
-      v_z1_sigma = ret['z1_sigma']
-      v_z1_rounded = ret['z1_rounded']
 
-      sigma_val = np.reshape(v_z1_sigma, (1,-1,1,1))
-      tshape = v_z1_rounded.shape
+      v_z2_sigma = ret['z2_sigma']
+      #v_z2_mu = ret['z2_mu']
+      v_z2_rounded = ret['z2_rounded']
+      sigma_val = np.reshape(v_z2_sigma, (1,-1,1,1))
+      tshape = v_z2_rounded.shape
       sigma_val = np.tile(sigma_val, (tshape[0], 1, tshape[2], tshape[3]))
       mu_val = np.zeros_like(sigma_val)
       mu_val[...] = 511
-      flat_sigma = sigma_val.reshape((-1))
-      flat_mu = mu_val.reshape((-1))
-      flat_coeff = (v_z1_rounded + 511).astype(np.int16).reshape((-1))
-      length = np.array([flat_sigma.shape[0]], dtype=np.int64)
-      s = length.tobytes() + flat_coeff.tobytes() + flat_mu.tobytes() + flat_sigma.tobytes()   
-      r = sp.run([EXE_ARITH,'e',f'{mask_a}',f'{mask_b}'], input=s, stdout=sp.PIPE)
-      bslen = np.array([len(r.stdout)], dtype=np.int64)
-      bsf.write(bslen.tobytes())
-      masks = np.array([mask_a,mask_b], dtype=np.uint8)
-      bsf.write(masks.tobytes())
-      bsf.write(r.stdout)
-      # print(length, bslen)
-
-      v_z2_sigma = ret['z2_sigma']
-      v_z2_mu = ret['z2_mu']
-      v_z2_rounded = ret['z2_rounded']
-        
-      sigma_val = v_z2_sigma
-      tshape = v_z2_rounded.shape
-      mu_val = v_z2_mu + 511
       flat_sigma = sigma_val.reshape((-1))
       flat_mu = mu_val.reshape((-1))
       flat_coeff = (v_z2_rounded + 511).astype(np.int16).reshape((-1))
@@ -983,7 +876,6 @@ def decompress_low(args, net):
 
   def decode_block(padded_h, padded_w):
     with torch.no_grad():
-      z1_hat = np.zeros((1, 32*4, padded_h//64, padded_w//64), dtype=np.float32)
       z2_hat = np.zeros((1, 64*4, padded_h//32, padded_w//32), dtype=np.float32)
       if model_size == 'large':
         z3_hat = np.zeros((1, 384, padded_h//16, padded_w//16) , dtype=np.float32)
@@ -995,16 +887,17 @@ def decompress_low(args, net):
         z3_hat = np.zeros((1, 48, padded_h//16, padded_w//16) , dtype=np.float32)
 
       ret = net.decode(None, 0)
-      sigma_z = ret['z1_sigma']
+      v_z2_sigma = ret['z2_sigma']
+      #v_z2_mu = ret['z2_mu']
 
       bslenbs = fileobj.read(8)
       bslen = np.frombuffer(bslenbs, dtype=np.int64)
       maskbs = fileobj.read(2)
       masks = np.frombuffer(maskbs, dtype=np.uint8)
       bs = fileobj.read(bslen[0])
-      length = np.array(z1_hat.reshape((-1)).shape[0], dtype=np.int64)
-      sigma_val = np.reshape(sigma_z, (1,-1,1,1))
-      tshape = z1_hat.shape
+      length = np.array(z2_hat.reshape((-1)).shape[0], dtype=np.int64)
+      sigma_val = np.reshape(v_z2_sigma, (1,-1,1,1))
+      tshape = z2_hat.shape
       sigma_val = np.tile(sigma_val, (tshape[0], 1, tshape[2], tshape[3]))
       mu_val = np.zeros_like(sigma_val)
       mu_val[...] = 511
@@ -1013,30 +906,9 @@ def decompress_low(args, net):
       s = length.tobytes() + flat_mu.tobytes() + flat_sigma.tobytes() + bs
       r = sp.run(['./module_arithmeticcoding','d',f'{masks[0]}',f'{masks[1]}'], input=s, stdout=sp.PIPE)
       coeffs = np.frombuffer(r.stdout, dtype=np.int16)
-      z1_hat[...] = coeffs.reshape(z1_hat.shape).astype(np.float32) - 511
-      
-
-      s2_in = {'z1_rounded':torch.tensor(z1_hat).to(device)}
-      
-      ret = net.decode(s2_in, 1)
-      v_z2_sigma = ret['z2_sigma']
-      v_z2_mu = ret['z2_mu']
-
-      bslenbs = fileobj.read(8)
-      bslen = np.frombuffer(bslenbs, dtype=np.int64)
-      maskbs = fileobj.read(2)
-      masks = np.frombuffer(maskbs, dtype=np.uint8)
-      bs = fileobj.read(bslen[0])
-      length = np.array(z2_hat.reshape((-1)).shape[0], dtype=np.int64)
-      sigma_val = v_z2_sigma
-      tshape = z2_hat.shape
-      mu_val = v_z2_mu + 511
-      flat_sigma = sigma_val.reshape((-1))
-      flat_mu = mu_val.reshape((-1))
-      s = length.tobytes() + flat_mu.tobytes() + flat_sigma.tobytes() + bs
-      r = sp.run(['./module_arithmeticcoding','d',f'{masks[0]}',f'{masks[1]}'], input=s, stdout=sp.PIPE)
-      coeffs = np.frombuffer(r.stdout, dtype=np.int16)
       z2_hat[...] = coeffs.reshape(z2_hat.shape).astype(np.float32) - 511
+
+
 
       s3_in = {'z2_rounded':torch.tensor(z2_hat).to(device)}
       ret = net.decode(s3_in, 2)
@@ -1064,8 +936,8 @@ def decompress_low(args, net):
       return x_tilde
 
   hs, ws = get_partition(padded_h, padded_w)
-  hs=[padded_h] #added
-  ws=[padded_w] #added
+  hs=[padded_h]
+  ws=[padded_w]
   blocks = []
   
   tar = np.zeros((1, 3, padded_h, padded_w), dtype=np.float32)
