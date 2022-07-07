@@ -21,20 +21,18 @@ import pickle
 
 import math
 import time
+import os
 
 from networks import *
 import sys
 import cv2
 from scipy import ndimage
-from collections import OrderedDict
-import torch
-import torchvision as tv
 
 def psnr(img1, img2):
   # img1 and img2 have range [0, 255]
   mse = np.mean((img1 - img2)**2)
   if mse == 0:
-    return float('inf')
+      return float('inf')
   return 20 * math.log10(255.0 / math.sqrt(mse))
 
 def ssim(img1, img2, cs_map=False):
@@ -57,9 +55,9 @@ def ssim(img1, img2, cs_map=False):
                                                           (sigma1_sq + sigma2_sq + C2))
 
   if cs_map:
-    return ssim_map.mean(), ((2.0*sigma12 + C2)/(sigma1_sq + sigma2_sq + C2)).mean()
+      return ssim_map.mean(), ((2.0*sigma12 + C2)/(sigma1_sq + sigma2_sq + C2)).mean()
   else:
-    return ssim_map.mean()
+      return ssim_map.mean()
 
 def msssim(img1, img2):
   """This function implements Multi-Scale Structural Similarity (MSSSIM) Image 
@@ -91,10 +89,12 @@ def msssim(img1, img2):
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(
       formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
   parser.add_argument(
-      "gamename", nargs="?",
-      help="gamename.")
+      "command", choices=["compress", "decompress"],
+      help="What to do? Choose from `compress` and `decompress`")
+  parser.add_argument(
+      "input", nargs="?",
+      help="Input filename.")
   parser.add_argument(
       "output", nargs="?",
       help="Output bin filename.")
@@ -122,64 +122,25 @@ if __name__ == "__main__":
       help="Which device does the network run on?"
   )
 
-  parser.add_argument(
-      "--model_size", default='large', type=str,
-      help="Model size, choose from: xsmall, small, median, large"
-  )
-  parser.add_argument(
-      "--model_file", default='xxx', type=str,
-      help="application specific ai model path."
-  )
-  parser.add_argument(
-      "--test_file", default='default', type=str,
-      help="a single file to test."
-  )
-
   args = parser.parse_args()
-  if args.gamename is None or args.output is None:
+
+  if args.input is None or args.output is None:
     raise ValueError("Need input and output filename for compression.")
-
-  if args.test_file!='default':
-    testpath = args.test_file
-  else:
-    testpath="../datasets/GameImage_dataset/test/"+args.gamename+"*/*.png"
-
-
-  if args.model_size == 'large':
-    net = NetLarge().eval()
-  elif args.model_size == 'median':
-    net = NetMedian().eval()
-  elif args.model_size == 'small':
-    net = NetSmall().eval()
-  else:
-    net = NetXSmall().eval()
-  net = net.to(args.device)
-  sd = torch.load(f"{args.model_file}")
-  nsd = OrderedDict()
-  for k, v in sd.items():
-    if 'proj_head_' in k or 'z2_sigma' in k or 'aux_conv' in k:
-      continue
-    name = k[7:]
-    nsd[name] = v
-  net.load_state_dict(nsd)
-  print(f'model_size:{args.model_size}, model_file: {args.model_file}')
-
-
-  images = list(sorted(glob.glob(testpath))) 
-  for input_image in images:
-    print("compressing...")
+  if args.command == "compress":
     start = time.time()
-    w, h = compress_low(args, input_image, net)
-    end1 = time.time()
-    
-    print("decompressing...")
-    decompress_low(args, net)
-    end2 = time.time()
-    
-    print("calculating psnr, ms-ssim...")
+    w, h = compress_low(args)
+    end = time.time()
     binsize = os.path.getsize(args.output)
     bpp = binsize*8/(w*h)
-    img1 = np.asarray(cv2.imread(input_image))
+    print("%d, %s, %dx%d, %10d, %3.5f, %3.5f," % (args.qp, args.input, w, h, binsize, end-start, bpp))
+    with open('%s' % args.outputcsv, 'a') as f:
+      f.write("%d, %s, %dx%d, %10d, %3.5f, %3.5f," % (args.qp, args.input, w, h, binsize, end-start, bpp))
+  elif args.command == "decompress":
+    start = time.time()
+    decompress_low(args)
+    end = time.time()
+
+    img1 = np.asarray(cv2.imread(args.input))
     img2 = np.asarray(cv2.imread(args.outputpng))
     if not img1.shape == img2.shape:
       raise ValueError('Input images must have the same dimensions.')
@@ -187,8 +148,7 @@ if __name__ == "__main__":
     img2 = img2.astype(np.float64)
     psnr_value 	  = psnr(img1, img2)
     ms_ssim_value = msssim(img1, img2)
-    ms_db = -10 * math.log10(1-ms_ssim_value)
-    
-    print("%s, %s, %dx%d, %10d, %3.5f, %3.5f, %3.5f, %3.5f, %3.5f, %3.5f" % (args.model_file, input_image, w, h, binsize, end1-start, bpp, end2-end1, psnr_value, ms_ssim_value, ms_db))
+    ms_db = -10 * math.log10(1-ms_ssim_value)  
+    print("%3.5f, %3.5f, %3.5f, %3.5f" % (end-start, psnr_value, ms_ssim_value, ms_db))
     with open('%s' % args.outputcsv, 'a') as f:
-      f.write("%s, %s, %dx%d, %10d, %3.5f, %3.5f, %3.5f, %3.5f, %3.5f, %3.5f\n" % (args.model_file, input_image, w, h, binsize, end1-start, bpp, end2-end1, psnr_value, ms_ssim_value, ms_db))
+      f.write("%3.5f, %3.5f, %3.5f, %3.5f\n" % (end-start, psnr_value, ms_ssim_value, ms_db))

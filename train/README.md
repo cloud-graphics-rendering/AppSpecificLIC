@@ -1,33 +1,30 @@
-## Train a App-Specific Learned Image Compression (LIC) Model
+## Train a Coarse-to-Fine Compression Model
 
 ### Data
-We use <a href="https://utsacloud-my.sharepoint.com/:u:/g/personal/wei_wang_utsa_edu/EROyq4JeQlxLuhWIFD-RFZ8BR69M1fiQk6HhhaoAE_TZnA?e=sTV1o0">Cloud 3D datasets (six gaming image datasets)</a> as the training data. For each application, there are 800 1280x720p images and 800 1920x1080p images are included. There are also 100+100 images for validation, and another 100+100 images for testing.
+We use DIV2K as the training data. All 800 images are included. Besides, we down-sampled all images to half of their sizes and build a training set with 1600 images.
 
-You may place the Cloud 3D datasets in a directory, assumed to be named ```IMAGE_PATH```.
+You may place the 1600 PNG files in a directory, assumed to be named ```IMAGE_PATH```.
 
-For Cloud 3D GameImage_dataset, you can train all the images or train the applications one by one:
+### Command
+An example command to train the network with 2 GPUs is as follows,
+
+```CUDA_VISIBLE_DEVICES=0,1 python train.py train --batchsize 16 --train_glob "IMAGE_PATH/*.png" --checkpoint_dir checkpoint --lambda 0.004```
+```CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint --lambda 0.16 --load_weights "./checkpoint/1600.ckpt```
+
+For GameImage_dataset, you can train all the images or train the applications one by one:
 Train all the images: "IMAGE_PATH/GameImage_dataset/train/*/*.png"
 Train individual app with 720p  image: "IMAGE_PATH/GameImage_dataset/train/supertuxkart-720p/*.png"
 Train individual app with 1080p image: "IMAGE_PATH/GameImage_dataset/train/supertuxkart-108p/*.png"
-Train individual app using 720p and 1080p: "IMAGE_PATH/GameImage_dataset/train/supertuxkart*/*.png"
+Train individual app (720p and 1080p): "IMAGE_PATH/GameImage_dataset/train/supertuxkart*/*.png"
 
-### Commands:
-The below shows an example about how to train supertuxkart small framework from scratch (without pretraining) with different lambdas:
-```
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small --lambda 0.004
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small --lambda 0.008
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 1 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/small --lambda 0.016
-```
+The above shows an example of supertuxkart.
+CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 16 --train_glob "/home/tianyiliu/Documents/ai-encoding/related-projects/datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint --lambda 0.004
 
-You can also try large, median, and xsamll framework with "--model_size 3/2/0"
-```
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large --lambda 0.004
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large --lambda 0.008
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large --lambda 0.016
-```
+You may use different numbers of GPUs. Please modify ```n_parallel``` in the code if you use a different number of GPUs.
 
-If you would like train from a specified checkpoint (e.g., 1000.ckpt), you can try:
-```
-CUDA_VISIBLE_DEVICES=0 python3 train.py train --batchsize 8 --model_size 3 --train_glob "../../datasets/GameImage_dataset/train/supertuxkart*/*.png" --checkpoint_dir checkpoint/large --lambda 0.16 --load_weights "./checkpoint/large/1000.ckpt
-```
-Please refer train.sh for more examples.
+The training checkpoints will be saved in ```checkpoint``` as set.
+
+If your training process is interrupted, you can continue from a specific checkpoint.
+```--load_weights "./checkpoint/xxx.ckpt"```
+
+Note that this is an experimental implementation of the training procedure with PyTorch. The code would train the model from scratch (without pretraining) and the resulting models would even achieve better R-D performance than released in the paper. If you encounter any problem, please feel free to contact me.
