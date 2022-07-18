@@ -22,7 +22,7 @@ Before running the python script, you need to compile the arithmetic coder, with
 
 ```g++ module_arithmeticcoding.cpp -o module_arithmeticcoding```
 
-You need to download the <a href="https://utsacloud-my.sharepoint.com/:u:/g/personal/wei_wang_utsa_edu/EROyq4JeQlxLuhWIFD-RFZ8BR69M1fiQk6HhhaoAE_TZnA?e=sTV1o0">Cloud 3D datasets (six gaming image datasets)</a> from UTSA Cloud. It is about 23.23GB, and might takes a while for downloading.
+You need to download the <a href="https://utsacloud-my.sharepoint.com/:u:/g/personal/wei_wang_utsa_edu/EROyq4JeQlxLuhWIFD-RFZ8BR69M1fiQk6HhhaoAE_TZnA?e=iJS5nJ">Cloud 3D datasets (six gaming image datasets)</a> from UTSA Cloud. It is about 23.23GB, and might takes a while for downloading.
 Create a dataset folder out of current repo:
 
 ```$ mkdir ../datasets```
@@ -37,7 +37,7 @@ $ ls ../datasets/GameImage_dataset
 resize.py  test  train  validation
 ```
 
-If you would like to try the compression and decompression directly, you also need to download some <a href="https://utsacloud-my.sharepoint.com/:u:/g/personal/wei_wang_utsa_edu/ESMNg7nCY0JIhMRUufmEoF8BMlRia4GpJOfzgLe6NCaoWQ?e=Zq7YTt">demo trained weights</a> from UTSA Cloud. After downloading and unziping trained weights to 'models' folder, the 'models' folder is like:
+If you would like to try the compression and decompression directly, you also need to download some <a href="https://utsacloud-my.sharepoint.com/:u:/g/personal/wei_wang_utsa_edu/EbBE6_Gv0PRLghkT9l8r5t0B1abY2cNv9hEZZgWm28PDAg?e=SnWscC">demo trained weights</a> from UTSA Cloud. After downloading and unziping trained weights to 'models' folder, the 'models' folder is like:
 ```
 $ ls ./models:
 large  median  small  small-spruning  sota  xsmall
